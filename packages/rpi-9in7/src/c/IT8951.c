@@ -515,8 +515,6 @@ void IT8951_Display_1bpp(UBYTE *image, UWORD x, UWORD y, UWORD w, UWORD h,
     IT8951AreaInfo stAreaInfo;
     
     // We need to expand 1bpp to 8bpp for IT8951
-    UDOUBLE pixelCount = (UDOUBLE)w * h;
-    UDOUBLE byteCount = (pixelCount + 7) / 8;  // Input is packed 1bpp
     UWORD wordCount = (w + 1) / 2;  // Output words per row (8bpp, 2 pixels per word)
     
     stLdImgInfo.ulStartFBAddr = targetAddr;
@@ -539,7 +537,6 @@ void IT8951_Display_1bpp(UBYTE *image, UWORD x, UWORD y, UWORD w, UWORD h,
         return;
     }
     
-    UDOUBLE inputIdx = 0;
     UBYTE bitMask;
     UBYTE pixel;
     
