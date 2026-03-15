@@ -26,21 +26,23 @@ except ImportError as e:
 # --------------------------------------------------------------------------
 RST_PIN  = 17
 HRDY_PIN = 24
-CS_PIN   = 8   # CE0 — controlled manually; SPI_NO_CS prevents kernel touching it
+# CS (GPIO 8 / CE0) is managed by the kernel spidev driver — do NOT claim it
+# via RPi.GPIO, as spi.open(0,0) already reserves it and lgpio will error.
 
 # --------------------------------------------------------------------------
-# Setup
+# Setup — only claim RST and HRDY; spidev owns CE0
 # --------------------------------------------------------------------------
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(RST_PIN,  GPIO.OUT, initial=GPIO.HIGH)
 GPIO.setup(HRDY_PIN, GPIO.IN)
-GPIO.setup(CS_PIN,   GPIO.OUT, initial=GPIO.HIGH)  # CS idle HIGH
 
 spi = spidev.SpiDev()
-spi.open(0, 0)            # /dev/spidev0.0
+spi.open(0, 0)            # /dev/spidev0.0  (kernel manages CE0)
 spi.max_speed_hz = 1000000
 spi.mode = 0
-spi.no_cs = True          # Disable kernel CE0 management — we control GPIO 8 manually
+# spi.no_cs is intentionally left False so the kernel toggles CE0 LOW/HIGH
+# around each xfer2 call.  We send preamble + payload in ONE xfer2 call so
+# that CE0 stays low for the entire transaction.
 
 print("=" * 60)
 print("  IT8951 Hardware Diagnostic")
@@ -89,39 +91,34 @@ def wait_hrdy(timeout=3.0):
     return True
 
 # --------------------------------------------------------------------------
-# IT8951 SPI protocol:
-#   Assert CS LOW → send preamble → wait HRDY → send cmd/data → deassert CS HIGH
-# CS is held LOW across the entire transaction (preamble + payload).
+# IT8951 SPI protocol
+#
+# CE0 is managed by the kernel: it goes LOW for the duration of one xfer2
+# call, then returns HIGH.  Therefore preamble + payload MUST be in a
+# SINGLE xfer2 call so that CE0 is never de-asserted mid-transaction.
+#
+# write_command : [0x60, 0x00, cmdH, cmdL]          — 4 bytes
+# write_data    : [0x00, 0x00, datH, datL]          — 4 bytes
+# read_data     : [0x10, 0x00, 0x00, 0x00, 0x00, 0x00] → rx[4:6]  — 6 bytes
 # --------------------------------------------------------------------------
 def write_command(cmd):
-    """Send a command word to IT8951."""
+    """Send a command word to IT8951 (preamble + cmd in one transfer)."""
     wait_hrdy()
-    GPIO.output(CS_PIN, GPIO.LOW)
-    spi.xfer2([0x60, 0x00])          # preamble: write command
-    wait_hrdy()
-    spi.xfer2([(cmd >> 8) & 0xFF, cmd & 0xFF])
-    GPIO.output(CS_PIN, GPIO.HIGH)
+    spi.xfer2([0x60, 0x00, (cmd >> 8) & 0xFF, cmd & 0xFF])
 
 def write_data(data):
-    """Send a data word to IT8951."""
+    """Send a data word to IT8951 (preamble + data in one transfer)."""
     wait_hrdy()
-    GPIO.output(CS_PIN, GPIO.LOW)
-    spi.xfer2([0x00, 0x00])          # preamble: write data
-    wait_hrdy()
-    spi.xfer2([(data >> 8) & 0xFF, data & 0xFF])
-    GPIO.output(CS_PIN, GPIO.HIGH)
+    spi.xfer2([0x00, 0x00, (data >> 8) & 0xFF, data & 0xFF])
 
 def read_data():
-    """Read a data word from IT8951."""
+    """Read a data word from IT8951.
+    Frame: 2-byte preamble + 2-byte dummy + 2-byte data = 6 bytes total.
+    Received bytes [4] and [5] contain the actual word.
+    """
     wait_hrdy()
-    GPIO.output(CS_PIN, GPIO.LOW)
-    spi.xfer2([0x10, 0x00])          # preamble: read data
-    wait_hrdy()
-    spi.xfer2([0x00, 0x00])          # dummy word (discard)
-    wait_hrdy()
-    rx = spi.xfer2([0x00, 0x00])     # actual data
-    GPIO.output(CS_PIN, GPIO.HIGH)
-    return (rx[0] << 8) | rx[1]
+    rx = spi.xfer2([0x10, 0x00, 0x00, 0x00, 0x00, 0x00])
+    return (rx[4] << 8) | rx[5]
 
 # --------------------------------------------------------------------------
 # Step 3: IT8951_SYS_RUN (0x0001)
