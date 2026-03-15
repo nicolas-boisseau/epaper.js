@@ -1,25 +1,27 @@
 /**
  * Test script for Waveshare 9.7" IT8951 e-Paper display
- * 
+ * Uses only pngjs (already a dependency) — no canvas required.
+ *
  * Usage:
  *   node test/test-display.js [mode]
- * 
+ *
  * Modes:
- *   clear    - Just clear the display (default)
- *   bw       - Display a black & white test pattern
- *   gray4    - Display a 4-level grayscale test pattern
- *   gray16   - Display a 16-level grayscale test pattern (default)
+ *   clear    - Just clear the display
+ *   bw       - Black & white test pattern
+ *   gray4    - 4-level grayscale test pattern
+ *   gray16   - 16-level grayscale test pattern (default)
  *   png      - Display a PNG file (pass path as 3rd argument)
- * 
+ *
  * Examples:
  *   node test/test-display.js clear
  *   node test/test-display.js gray16
  *   node test/test-display.js png /path/to/image.png
  */
 
-const { createCanvas } = require('canvas');
+'use strict';
+
 const fs = require('fs');
-const path = require('path');
+const { PNG } = require('pngjs');
 
 // Dynamically require the compiled module
 let Rpi9In7, Orientation, ColorMode;
@@ -32,96 +34,62 @@ try {
     process.exit(1);
 }
 
-const VCOM = -1.84;  // Your display VCOM value
+const VCOM = -1.84;
+const WIDTH = 1200;
+const HEIGHT = 825;
 const MODE = process.argv[2] || 'gray16';
 const PNG_PATH = process.argv[3];
 
-// --- Canvas-based test pattern generators ---
+// ---------------------------------------------------------------------------
+// PNG generators using pngjs (pure JS, no native deps)
+// ---------------------------------------------------------------------------
 
-function generateBWPattern(width, height) {
-    const { createCanvas } = requireCanvas();
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
-
-    // White background
-    ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, width, height);
-
-    // Black stripes
-    ctx.fillStyle = 'black';
-    for (let x = 0; x < width; x += 40) {
-        ctx.fillRect(x, 0, 20, height);
+/**
+ * Create a PNG buffer from a pixel-fill callback: (x, y) => { r, g, b }
+ */
+function makePNG(width, height, fillFn) {
+    const png = new PNG({ width, height, filterType: -1 });
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const idx = (width * y + x) * 4;
+            const { r, g, b } = fillFn(x, y);
+            png.data[idx] = r;
+            png.data[idx + 1] = g;
+            png.data[idx + 2] = b;
+            png.data[idx + 3] = 255;
+        }
     }
-
-    // Text
-    ctx.fillStyle = 'black';
-    ctx.font = 'bold 60px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('ePaper.js - B&W Test', width / 2, height / 2);
-
-    return canvas.toBuffer('image/png');
+    return PNG.sync.write(png);
 }
 
-function generateGray4Pattern(width, height) {
-    const canvas = requireCanvas().createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
+/** Black & white checkerboard + horizontal black bar in the middle */
+function generateBWPattern(w, h) {
+    return makePNG(w, h, (x, y) => {
+        if (y > h / 3 && y < (2 * h) / 3) {
+            return { r: 0, g: 0, b: 0 };
+        }
+        const v = (Math.floor(x / 60) + Math.floor(y / 60)) % 2 === 0 ? 255 : 0;
+        return { r: v, g: v, b: v };
+    });
+}
 
+/** 4 vertical bands: black, dark gray, light gray, white */
+function generateGray4Pattern(w, h) {
     const levels = [0, 85, 170, 255];
-    const blockWidth = Math.floor(width / 4);
-
-    for (let i = 0; i < 4; i++) {
-        const v = levels[i];
-        ctx.fillStyle = `rgb(${v},${v},${v})`;
-        ctx.fillRect(i * blockWidth, 0, blockWidth, height);
-    }
-
-    ctx.fillStyle = levels[0] < 128 ? 'white' : 'black';
-    ctx.font = 'bold 50px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('ePaper.js - 4 Gray Levels', width / 2, height / 2);
-
-    return canvas.toBuffer('image/png');
+    return makePNG(w, h, (x) => {
+        const band = Math.min(Math.floor((x / w) * 4), 3);
+        const v = levels[band];
+        return { r: v, g: v, b: v };
+    });
 }
 
-function generateGray16Pattern(width, height) {
-    const canvas = requireCanvas().createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
-
-    const blockWidth = Math.floor(width / 16);
-
-    // Draw 16 gray level bars
-    for (let i = 0; i < 16; i++) {
-        const v = Math.round((i / 15) * 255);
-        ctx.fillStyle = `rgb(${v},${v},${v})`;
-        ctx.fillRect(i * blockWidth, 0, blockWidth, height);
-    }
-
-    // Labels
-    for (let i = 0; i < 16; i++) {
-        const v = Math.round((i / 15) * 255);
-        ctx.fillStyle = v < 128 ? 'white' : 'black';
-        ctx.font = 'bold 28px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(String(i), i * blockWidth + blockWidth / 2, height / 2);
-    }
-
-    ctx.fillStyle = 'black';
-    ctx.font = 'bold 40px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('ePaper.js - 16 Gray Levels', width / 2, height - 40);
-
-    return canvas.toBuffer('image/png');
-}
-
-function requireCanvas() {
-    try {
-        return require('canvas');
-    } catch (e) {
-        console.error('"canvas" module not found. Install it with:');
-        console.error('  sudo apt install libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev');
-        console.error('  npm install canvas');
-        process.exit(1);
-    }
+/** 16 vertical bands from black (left) to white (right) */
+function generateGray16Pattern(w, h) {
+    return makePNG(w, h, (x) => {
+        const band = Math.min(Math.floor((x / w) * 16), 15);
+        const v = Math.round((band / 15) * 255);
+        return { r: v, g: v, b: v };
+    });
 }
 
 // --- Main ---
@@ -129,7 +97,10 @@ function requireCanvas() {
 async function main() {
     const display = new Rpi9In7(Orientation.Horizontal, getModeColorMode(), VCOM);
 
-    console.log(`Connecting to display (VCOM=${VCOM}, mode=${MODE})...`);
+    console.log(`\n=== Waveshare 9.7" IT8951 test ===`);
+    console.log(`Mode: ${MODE}  |  VCOM: ${VCOM}\n`);
+
+    console.log('Connecting...');
     display.connect();
 
     console.log('Clearing display...');
@@ -139,37 +110,36 @@ async function main() {
         console.log('Clear done.');
     } else if (MODE === 'png') {
         if (!PNG_PATH || !fs.existsSync(PNG_PATH)) {
-            console.error(`PNG file not found: ${PNG_PATH}`);
+            console.error(`PNG file not found: ${PNG_PATH || '(no path given)'}`);
             console.error('Usage: node test/test-display.js png /path/to/image.png');
             process.exit(1);
         }
-        console.log(`Displaying PNG: ${PNG_PATH}`);
+        console.log(`Displaying: ${PNG_PATH}`);
         const img = fs.readFileSync(PNG_PATH);
         await display.displayPng(img);
         console.log('Done.');
     } else {
-        console.log(`Generating ${MODE} test pattern (1200x825)...`);
+        console.log(`Generating ${MODE} test pattern (${WIDTH}x${HEIGHT})...`);
         let imgBuffer;
-        if (MODE === 'bw') imgBuffer = generateBWPattern(1200, 825);
-        if (MODE === 'gray4') imgBuffer = generateGray4Pattern(1200, 825);
-        if (MODE === 'gray16') imgBuffer = generateGray16Pattern(1200, 825);
+        if (MODE === 'bw') imgBuffer = generateBWPattern(WIDTH, HEIGHT);
+        else if (MODE === 'gray4') imgBuffer = generateGray4Pattern(WIDTH, HEIGHT);
+        else imgBuffer = generateGray16Pattern(WIDTH, HEIGHT);
 
-        console.log('Sending image to display...');
+        console.log('Sending to display...');
         await display.displayPng(imgBuffer);
         console.log('Done.');
     }
 
-    console.log('Going to sleep...');
+    console.log('Sleeping...');
     display.sleep();
     display.disconnect();
+    console.log('Disconnected.\n');
 }
 
 function getModeColorMode() {
     switch (MODE) {
         case 'bw': return ColorMode.Black;
         case 'gray4': return ColorMode.Gray4;
-        case 'png':
-        case 'gray16':
         default: return ColorMode.Gray16;
     }
 }
