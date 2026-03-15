@@ -239,12 +239,13 @@ void DEV_GPIO_Init(void)
 #ifdef RPI
     IT8951_RST_PIN  = 17;   // Reset pin
     IT8951_HRDY_PIN = 24;   // Host Ready pin (input)
-    // CS (GPIO8/CE0) is managed by the kernel SPI driver — do NOT configure it here
-    IT8951_CS_PIN   = -1;   // Unused: CE0 managed by /dev/spidev0.0
+    IT8951_CS_PIN   = 8;    // CE0 — controlled manually via sysfs; SPI_NO_CS prevents kernel conflict
 #endif
 
     DEV_GPIO_Mode(IT8951_RST_PIN, 1);   // Output
     DEV_GPIO_Mode(IT8951_HRDY_PIN, 0);  // Input
+    DEV_GPIO_Mode(IT8951_CS_PIN, 1);    // Output
+    DEV_Digital_Write(IT8951_CS_PIN, 1); // CS idle HIGH
 }
 
 /******************************************************************************
@@ -296,6 +297,10 @@ UBYTE DEV_Module_Init(void)
     DEV_HARDWARE_SPI_begin("/dev/spidev0.0");
     // 2MHz is safe for init; can be increased after IT8951 is confirmed working
     DEV_HARDWARE_SPI_setSpeed(2000000);
+    // Disable kernel CE0 management — we control GPIO 8 (CS) manually so that
+    // CS can be held LOW across the preamble + HRDY wait + payload sequence
+    // that the IT8951 SPI protocol requires.
+    DEV_HARDWARE_SPI_CSEN(ENABLE);
 #endif
 
 #endif

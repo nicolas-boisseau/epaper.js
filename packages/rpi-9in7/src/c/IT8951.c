@@ -56,99 +56,134 @@ static void IT8951_WaitForReady(void)
 
 /**
  * Write a command word to IT8951.
- * Preamble (0x6000) and command are sent as a single 4-byte SPI transfer
- * so that the kernel-managed CE0 covers the whole transaction.
+ *
+ * IT8951 SPI protocol requires CS held LOW across the entire transaction:
+ *   1. Assert CS LOW
+ *   2. Wait HRDY HIGH (IT8951 ready)
+ *   3. Send preamble 0x6000 (2 bytes)
+ *   4. Wait HRDY HIGH (IT8951 decoded preamble, may briefly pull HRDY LOW)
+ *   5. Send command word (2 bytes)
+ *   6. Deassert CS HIGH
+ *
+ * SPI_NO_CS is set on the spidev fd so the kernel does NOT touch CE0;
+ * we drive GPIO 8 (IT8951_CS_PIN) manually via sysfs.
  */
 static void IT8951_WriteCommand(UWORD usCmd)
 {
-    uint8_t buf[4] = {
-        0x60, 0x00,                         /* preamble: write command */
-        (uint8_t)((usCmd >> 8) & 0xFF),
-        (uint8_t)(usCmd & 0xFF)
-    };
+    uint8_t preamble[2] = { 0x60, 0x00 };
+    uint8_t cmd[2] = { (uint8_t)((usCmd >> 8) & 0xFF), (uint8_t)(usCmd & 0xFF) };
+
     IT8951_WaitForReady();
-    DEV_SPI_Write_nByte(buf, 4);
+    DEV_Digital_Write(IT8951_CS_PIN, 0);   /* assert CS */
+    DEV_SPI_Write_nByte(preamble, 2);      /* write-command preamble */
+    IT8951_WaitForReady();                  /* wait: IT8951 processes preamble */
+    DEV_SPI_Write_nByte(cmd, 2);           /* command word */
+    DEV_Digital_Write(IT8951_CS_PIN, 1);   /* deassert CS */
 }
 
 /**
  * Write a data word to IT8951.
- * Preamble (0x0000) and data are sent as a single 4-byte SPI transfer.
+ * Same CS/HRDY protocol as WriteCommand but with preamble 0x0000.
  */
 static void IT8951_WriteData(UWORD usData)
 {
-    uint8_t buf[4] = {
-        0x00, 0x00,                          /* preamble: write data */
-        (uint8_t)((usData >> 8) & 0xFF),
-        (uint8_t)(usData & 0xFF)
-    };
+    uint8_t preamble[2] = { 0x00, 0x00 };
+    uint8_t dat[2] = { (uint8_t)((usData >> 8) & 0xFF), (uint8_t)(usData & 0xFF) };
+
     IT8951_WaitForReady();
-    DEV_SPI_Write_nByte(buf, 4);
+    DEV_Digital_Write(IT8951_CS_PIN, 0);
+    DEV_SPI_Write_nByte(preamble, 2);      /* write-data preamble */
+    IT8951_WaitForReady();
+    DEV_SPI_Write_nByte(dat, 2);
+    DEV_Digital_Write(IT8951_CS_PIN, 1);
 }
 
 /**
  * Read a data word from IT8951.
- * Preamble (0x1000) + dummy word + actual read, all in one transfer.
+ * Preamble 0x1000 → wait HRDY → dummy 2 bytes → wait HRDY → read 2 bytes.
  */
 static UWORD IT8951_ReadData(void)
 {
-    /* Total frame: 2-byte preamble + 2-byte dummy + 2-byte data = 6 bytes */
-    uint8_t buf[6] = { 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    uint8_t preamble[2] = { 0x10, 0x00 };
+    uint8_t dummy[2]    = { 0x00, 0x00 };
+    uint8_t rx[2]       = { 0x00, 0x00 };
+
     IT8951_WaitForReady();
-    DEV_SPI_Write_nByte(buf, 6);   /* full-duplex: buf is overwritten with RX */
-    return (UWORD)((buf[4] << 8) | buf[5]);
+    DEV_Digital_Write(IT8951_CS_PIN, 0);
+    DEV_SPI_Write_nByte(preamble, 2);       /* read-data preamble */
+    IT8951_WaitForReady();
+    DEV_SPI_Write_nByte(dummy, 2);          /* dummy word (discarded) */
+    IT8951_WaitForReady();
+    DEV_SPI_Read_nByte(rx, 2);              /* actual data */
+    DEV_Digital_Write(IT8951_CS_PIN, 1);
+    return (UWORD)((rx[0] << 8) | rx[1]);
 }
 
 /**
  * Write N data words to IT8951.
- * Preamble (0x0000) + all words sent in ONE ioctl call so that
- * the kernel-managed CE0 stays asserted for the whole transaction.
+ *
+ * Protocol:
+ *   CS LOW → wait HRDY → preamble 0x0000 (2 bytes) →
+ *   wait HRDY → bulk data (2*N bytes) → CS HIGH
+ *
+ * The preamble is sent separately so that we can check HRDY between
+ * preamble and payload.  The bulk data is sent in a single ioctl call
+ * so that CE0 (which SPI_NO_CS suppresses) doesn't fragment the stream.
  */
 static void IT8951_WriteNData(UWORD *pwBuf, UDOUBLE ulSizeWordCnt)
 {
-    UDOUBLE totalBytes = 2 + ulSizeWordCnt * 2;  /* 2 preamble + 2*N data */
-    uint8_t *buf = (uint8_t *)malloc(totalBytes);
+    uint8_t preamble[2] = { 0x00, 0x00 };
+    UDOUBLE dataBytes = ulSizeWordCnt * 2;
+    uint8_t *buf = (uint8_t *)malloc(dataBytes);
     if(!buf) {
         printf("IT8951_WriteNData: malloc failed\r\n");
         return;
     }
 
-    buf[0] = 0x00;
-    buf[1] = 0x00;
     UDOUBLE i;
     for(i = 0; i < ulSizeWordCnt; i++) {
-        buf[2 + i*2]     = (uint8_t)((pwBuf[i] >> 8) & 0xFF);
-        buf[2 + i*2 + 1] = (uint8_t)(pwBuf[i] & 0xFF);
+        buf[i*2]     = (uint8_t)((pwBuf[i] >> 8) & 0xFF);
+        buf[i*2 + 1] = (uint8_t)(pwBuf[i] & 0xFF);
     }
 
     IT8951_WaitForReady();
-    DEV_SPI_Write_nByte(buf, (uint32_t)totalBytes);
+    DEV_Digital_Write(IT8951_CS_PIN, 0);          /* assert CS */
+    DEV_SPI_Write_nByte(preamble, 2);             /* write-data preamble */
+    IT8951_WaitForReady();                         /* wait: IT8951 ready for data */
+    DEV_SPI_Write_nByte(buf, (uint32_t)dataBytes); /* payload */
+    DEV_Digital_Write(IT8951_CS_PIN, 1);          /* deassert CS */
     free(buf);
 }
 
 /**
  * Read N data words from IT8951.
- * 2-byte preamble + 2-byte dummy + 2*N receive, all in one ioctl call.
+ *
+ * Protocol:
+ *   CS LOW → wait HRDY → preamble 0x1000 (2 bytes) →
+ *   wait HRDY → dummy (2 bytes) + read data (2*N bytes) → CS HIGH
  */
 static void IT8951_ReadNData(UWORD *pwBuf, UDOUBLE ulSizeWordCnt)
 {
-    UDOUBLE totalBytes = 4 + ulSizeWordCnt * 2;  /* 2 preamble + 2 dummy + 2*N */
-    uint8_t *buf = (uint8_t *)malloc(totalBytes);
+    uint8_t preamble[2] = { 0x10, 0x00 };
+    UDOUBLE rxBytes = 2 + ulSizeWordCnt * 2;   /* 2 dummy + 2*N data */
+    uint8_t *buf = (uint8_t *)malloc(rxBytes);
     if(!buf) {
         printf("IT8951_ReadNData: malloc failed\r\n");
         return;
     }
-
-    memset(buf, 0x00, totalBytes);
-    buf[0] = 0x10;  /* read preamble */
-    buf[1] = 0x00;
+    memset(buf, 0x00, rxBytes);
 
     IT8951_WaitForReady();
-    DEV_SPI_Write_nByte(buf, (uint32_t)totalBytes);  /* full-duplex */
+    DEV_Digital_Write(IT8951_CS_PIN, 0);           /* assert CS */
+    DEV_SPI_Write_nByte(preamble, 2);              /* read-data preamble */
+    IT8951_WaitForReady();
+    DEV_SPI_Write_nByte(buf, (uint32_t)rxBytes);   /* dummy + receive (full-duplex) */
+    DEV_Digital_Write(IT8951_CS_PIN, 1);           /* deassert CS */
 
-    /* Copy received words — bytes 0..3 are preamble+dummy (discard) */
+    /* buf[0..1] = dummy word (discard), buf[2..] = actual data */
     UDOUBLE i;
     for(i = 0; i < ulSizeWordCnt; i++) {
-        pwBuf[i] = (UWORD)((buf[4 + i*2] << 8) | buf[4 + i*2 + 1]);
+        pwBuf[i] = (UWORD)((buf[2 + i*2] << 8) | buf[2 + i*2 + 1]);
     }
     free(buf);
 }
