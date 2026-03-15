@@ -39,145 +39,118 @@ static UDOUBLE gMemAddr = 0;
 //-----------------------------------------------------------
 
 /**
- * Wait for the IT8951 to be ready (HRDY pin high)
+ * Wait for the IT8951 to be ready (HRDY pin high).
+ * Called BEFORE asserting CS for a new transaction.
  */
 static void IT8951_WaitForReady(void)
 {
+    UDOUBLE timeout = 0;
     while(DEV_Digital_Read(IT8951_HRDY_PIN) == 0) {
         DEV_Delay_ms(1);
+        if(++timeout > 5000) {
+            printf("IT8951_WaitForReady timeout!\r\n");
+            break;
+        }
     }
 }
 
 /**
- * Write a command word to IT8951
+ * Write a command word to IT8951.
+ * Preamble (0x6000) and command are sent as a single 4-byte SPI transfer
+ * so that the kernel-managed CE0 covers the whole transaction.
  */
 static void IT8951_WriteCommand(UWORD usCmd)
 {
+    uint8_t buf[4] = {
+        0x60, 0x00,                         /* preamble: write command */
+        (uint8_t)((usCmd >> 8) & 0xFF),
+        (uint8_t)(usCmd & 0xFF)
+    };
     IT8951_WaitForReady();
-    
-    DEV_Digital_Write(IT8951_CS_PIN, 0);
-    
-    // Preamble: 0x6000 indicates command follows
-    DEV_SPI_WriteByte(0x60);
-    DEV_SPI_WriteByte(0x00);
-    
-    IT8951_WaitForReady();
-    
-    // Write command word (MSB first)
-    DEV_SPI_WriteByte((usCmd >> 8) & 0xFF);
-    DEV_SPI_WriteByte(usCmd & 0xFF);
-    
-    DEV_Digital_Write(IT8951_CS_PIN, 1);
+    DEV_SPI_Write_nByte(buf, 4);
 }
 
 /**
- * Write a data word to IT8951
+ * Write a data word to IT8951.
+ * Preamble (0x0000) and data are sent as a single 4-byte SPI transfer.
  */
 static void IT8951_WriteData(UWORD usData)
 {
+    uint8_t buf[4] = {
+        0x00, 0x00,                          /* preamble: write data */
+        (uint8_t)((usData >> 8) & 0xFF),
+        (uint8_t)(usData & 0xFF)
+    };
     IT8951_WaitForReady();
-    
-    DEV_Digital_Write(IT8951_CS_PIN, 0);
-    
-    // Preamble: 0x0000 indicates data follows
-    DEV_SPI_WriteByte(0x00);
-    DEV_SPI_WriteByte(0x00);
-    
-    IT8951_WaitForReady();
-    
-    // Write data word (MSB first)
-    DEV_SPI_WriteByte((usData >> 8) & 0xFF);
-    DEV_SPI_WriteByte(usData & 0xFF);
-    
-    DEV_Digital_Write(IT8951_CS_PIN, 1);
+    DEV_SPI_Write_nByte(buf, 4);
 }
 
 /**
- * Read a data word from IT8951
+ * Read a data word from IT8951.
+ * Preamble (0x1000) + dummy word + actual read, all in one transfer.
  */
 static UWORD IT8951_ReadData(void)
 {
-    UWORD usData;
-    
+    /* Total frame: 2-byte preamble + 2-byte dummy + 2-byte data = 6 bytes */
+    uint8_t buf[6] = { 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
     IT8951_WaitForReady();
-    
-    DEV_Digital_Write(IT8951_CS_PIN, 0);
-    
-    // Preamble: 0x1000 indicates read data follows
-    DEV_SPI_WriteByte(0x10);
-    DEV_SPI_WriteByte(0x00);
-    
-    IT8951_WaitForReady();
-    
-    // Dummy read
-    DEV_SPI_ReadByte();
-    DEV_SPI_ReadByte();
-    
-    IT8951_WaitForReady();
-    
-    // Read actual data (MSB first)
-    usData = DEV_SPI_ReadByte() << 8;
-    usData |= DEV_SPI_ReadByte();
-    
-    DEV_Digital_Write(IT8951_CS_PIN, 1);
-    
-    return usData;
+    DEV_SPI_Write_nByte(buf, 6);   /* full-duplex: buf is overwritten with RX */
+    return (UWORD)((buf[4] << 8) | buf[5]);
 }
 
 /**
- * Write N data words to IT8951
+ * Write N data words to IT8951.
+ * Preamble (0x0000) + all words sent in ONE ioctl call so that
+ * the kernel-managed CE0 stays asserted for the whole transaction.
  */
 static void IT8951_WriteNData(UWORD *pwBuf, UDOUBLE ulSizeWordCnt)
 {
-    UDOUBLE i;
-    
-    IT8951_WaitForReady();
-    
-    DEV_Digital_Write(IT8951_CS_PIN, 0);
-    
-    // Preamble
-    DEV_SPI_WriteByte(0x00);
-    DEV_SPI_WriteByte(0x00);
-    
-    IT8951_WaitForReady();
-    
-    for(i = 0; i < ulSizeWordCnt; i++) {
-        DEV_SPI_WriteByte((pwBuf[i] >> 8) & 0xFF);
-        DEV_SPI_WriteByte(pwBuf[i] & 0xFF);
+    UDOUBLE totalBytes = 2 + ulSizeWordCnt * 2;  /* 2 preamble + 2*N data */
+    uint8_t *buf = (uint8_t *)malloc(totalBytes);
+    if(!buf) {
+        printf("IT8951_WriteNData: malloc failed\r\n");
+        return;
     }
-    
-    DEV_Digital_Write(IT8951_CS_PIN, 1);
+
+    buf[0] = 0x00;
+    buf[1] = 0x00;
+    UDOUBLE i;
+    for(i = 0; i < ulSizeWordCnt; i++) {
+        buf[2 + i*2]     = (uint8_t)((pwBuf[i] >> 8) & 0xFF);
+        buf[2 + i*2 + 1] = (uint8_t)(pwBuf[i] & 0xFF);
+    }
+
+    IT8951_WaitForReady();
+    DEV_SPI_Write_nByte(buf, (uint32_t)totalBytes);
+    free(buf);
 }
 
 /**
- * Read N data words from IT8951
+ * Read N data words from IT8951.
+ * 2-byte preamble + 2-byte dummy + 2*N receive, all in one ioctl call.
  */
 static void IT8951_ReadNData(UWORD *pwBuf, UDOUBLE ulSizeWordCnt)
 {
-    UDOUBLE i;
-    
-    IT8951_WaitForReady();
-    
-    DEV_Digital_Write(IT8951_CS_PIN, 0);
-    
-    // Preamble
-    DEV_SPI_WriteByte(0x10);
-    DEV_SPI_WriteByte(0x00);
-    
-    IT8951_WaitForReady();
-    
-    // Dummy read
-    DEV_SPI_ReadByte();
-    DEV_SPI_ReadByte();
-    
-    IT8951_WaitForReady();
-    
-    for(i = 0; i < ulSizeWordCnt; i++) {
-        pwBuf[i] = DEV_SPI_ReadByte() << 8;
-        pwBuf[i] |= DEV_SPI_ReadByte();
+    UDOUBLE totalBytes = 4 + ulSizeWordCnt * 2;  /* 2 preamble + 2 dummy + 2*N */
+    uint8_t *buf = (uint8_t *)malloc(totalBytes);
+    if(!buf) {
+        printf("IT8951_ReadNData: malloc failed\r\n");
+        return;
     }
-    
-    DEV_Digital_Write(IT8951_CS_PIN, 1);
+
+    memset(buf, 0x00, totalBytes);
+    buf[0] = 0x10;  /* read preamble */
+    buf[1] = 0x00;
+
+    IT8951_WaitForReady();
+    DEV_SPI_Write_nByte(buf, (uint32_t)totalBytes);  /* full-duplex */
+
+    /* Copy received words — bytes 0..3 are preamble+dummy (discard) */
+    UDOUBLE i;
+    for(i = 0; i < ulSizeWordCnt; i++) {
+        pwBuf[i] = (UWORD)((buf[4 + i*2] << 8) | buf[4 + i*2 + 1]);
+    }
+    free(buf);
 }
 
 //-----------------------------------------------------------
@@ -429,15 +402,15 @@ void IT8951_DisplayArea(UWORD usX, UWORD usY, UWORD usW, UWORD usH, UWORD usMode
  */
 void IT8951_DisplayAreaBuf(UWORD usX, UWORD usY, UWORD usW, UWORD usH, UWORD usMode, UDOUBLE ulTargetMemAddr)
 {
-    IT8951_WriteCommand(0x0034);  // DPY_AREA command
-    IT8951_WriteData(ulTargetMemAddr & 0xFFFF);
-    IT8951_WriteData((ulTargetMemAddr >> 16) & 0xFFFF);
+    IT8951_WriteCommand(0x0037);  /* USDEF_I80_CMD_DPY_BUF_AREA */
+    IT8951_WriteData((UWORD)(ulTargetMemAddr & 0xFFFF));
+    IT8951_WriteData((UWORD)((ulTargetMemAddr >> 16) & 0xFFFF));
     IT8951_WriteData(usMode);
     IT8951_WriteData(usX);
     IT8951_WriteData(usY);
     IT8951_WriteData(usW);
     IT8951_WriteData(usH);
-    IT8951_WriteData(1);  // Wait for complete
+    IT8951_WriteData(1);  /* enable waveform setting */
 }
 
 //-----------------------------------------------------------
@@ -507,68 +480,61 @@ void IT8951_Clear_Refresh(IT8951DevInfo *info)
 
 /**
  * Display 1bpp image (black and white)
+ * Expands 1bpp packed input to 8bpp words for IT8951, sent in one batch.
  */
 void IT8951_Display_1bpp(UBYTE *image, UWORD x, UWORD y, UWORD w, UWORD h, 
                          UDOUBLE targetAddr, UBYTE isInvert)
 {
     IT8951LdImgInfo stLdImgInfo;
     IT8951AreaInfo stAreaInfo;
-    
-    // We need to expand 1bpp to 8bpp for IT8951
-    UWORD wordCount = (w + 1) / 2;  // Output words per row (8bpp, 2 pixels per word)
-    
-    stLdImgInfo.ulStartFBAddr = targetAddr;
-    stLdImgInfo.usEndianType = IT8951_LDIMG_L_ENDIAN;
-    stLdImgInfo.usPixelFormat = IT8951_8BPP;
-    stLdImgInfo.usRotate = IT8951_ROTATE_0;
-    
-    stAreaInfo.usX = x;
-    stAreaInfo.usY = y;
-    stAreaInfo.usWidth = w;
-    stAreaInfo.usHeight = h;
-    
-    IT8951_LoadImgAreaStart(&stLdImgInfo, &stAreaInfo);
-    
-    // Process line by line
-    UWORD *lineBuf = (UWORD *)malloc(wordCount * sizeof(UWORD));
-    if (lineBuf == NULL) {
-        printf("Memory allocation failed\r\n");
-        IT8951_LoadImgEnd();
+
+    UWORD wordCount = (w + 1) / 2;             /* 2 pixels per word in 8bpp */
+    UDOUBLE totalWords = (UDOUBLE)wordCount * h;
+    UWORD inputBytesPerRow = (w + 7) / 8;
+
+    UWORD *outBuf = (UWORD *)malloc(totalWords * sizeof(UWORD));
+    if(!outBuf) {
+        printf("IT8951_Display_1bpp: malloc failed\r\n");
         return;
     }
-    
-    UBYTE bitMask;
-    UBYTE pixel;
-    
+
+    /* Convert 1bpp packed → 8bpp (2 pixels per word, MSB = first pixel) */
+    UDOUBLE outIdx = 0;
     for(UWORD row = 0; row < h; row++) {
-        UWORD outIdx = 0;
         for(UWORD col = 0; col < w; col += 2) {
-            // Get first pixel
-            bitMask = 0x80 >> ((col) % 8);
-            pixel = (image[(row * ((w + 7) / 8)) + (col / 8)] & bitMask) ? 0xFF : 0x00;
-            if(isInvert) pixel = ~pixel;
-            
-            UWORD word = pixel << 8;
-            
-            // Get second pixel if available
+            UBYTE mask0 = 0x80 >> (col % 8);
+            UBYTE pix0  = (image[row * inputBytesPerRow + col / 8] & mask0) ? 0xFF : 0x00;
+            if(isInvert) pix0 = ~pix0;
+
+            UWORD word = (UWORD)(pix0 << 8);
+
             if(col + 1 < w) {
-                bitMask = 0x80 >> ((col + 1) % 8);
-                pixel = (image[(row * ((w + 7) / 8)) + ((col + 1) / 8)] & bitMask) ? 0xFF : 0x00;
-                if(isInvert) pixel = ~pixel;
-                word |= pixel;
+                UBYTE mask1 = 0x80 >> ((col + 1) % 8);
+                UBYTE pix1  = (image[row * inputBytesPerRow + (col + 1) / 8] & mask1) ? 0xFF : 0x00;
+                if(isInvert) pix1 = ~pix1;
+                word |= pix1;
             } else {
-                word |= 0xFF;  // Padding with white
+                word |= 0xFF;  /* white padding */
             }
-            
-            lineBuf[outIdx++] = word;
+            outBuf[outIdx++] = word;
         }
-        IT8951_WritePixelData(lineBuf, wordCount);
     }
-    
-    free(lineBuf);
+
+    stLdImgInfo.ulStartFBAddr = targetAddr;
+    stLdImgInfo.usEndianType  = IT8951_LDIMG_L_ENDIAN;
+    stLdImgInfo.usPixelFormat = IT8951_8BPP;
+    stLdImgInfo.usRotate      = IT8951_ROTATE_0;
+
+    stAreaInfo.usX      = x;
+    stAreaInfo.usY      = y;
+    stAreaInfo.usWidth  = w;
+    stAreaInfo.usHeight = h;
+
+    IT8951_LoadImgAreaStart(&stLdImgInfo, &stAreaInfo);
+    IT8951_WritePixelData(outBuf, totalWords);
+    free(outBuf);
     IT8951_LoadImgEnd();
-    
-    // Refresh display
+
     IT8951_WaitForDisplayReady();
     IT8951_DisplayAreaBuf(x, y, w, h, IT8951_MODE_DU, targetAddr);
 }

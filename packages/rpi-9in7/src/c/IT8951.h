@@ -73,7 +73,6 @@
 
 // Memory Converter registers
 #define IT8951_MCSR                 0x0200
-#define IT8951_LISAR                0x0200
 
 //-----------------------------------------------------------
 // Waveform update modes

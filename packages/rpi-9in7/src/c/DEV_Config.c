@@ -237,17 +237,14 @@ static int DEV_Equipment_Testing(void)
 void DEV_GPIO_Init(void)
 {
 #ifdef RPI
-    // IT8951 uses different pins
     IT8951_RST_PIN  = 17;   // Reset pin
-    IT8951_CS_PIN   = 8;    // Chip select (SPI CE0)
-    IT8951_HRDY_PIN = 24;   // Host Ready pin
+    IT8951_HRDY_PIN = 24;   // Host Ready pin (input)
+    // CS (GPIO8/CE0) is managed by the kernel SPI driver — do NOT configure it here
+    IT8951_CS_PIN   = -1;   // Unused: CE0 managed by /dev/spidev0.0
 #endif
 
     DEV_GPIO_Mode(IT8951_RST_PIN, 1);   // Output
-    DEV_GPIO_Mode(IT8951_CS_PIN, 1);    // Output
     DEV_GPIO_Mode(IT8951_HRDY_PIN, 0);  // Input
-
-    DEV_Digital_Write(IT8951_CS_PIN, 1);
 }
 
 /******************************************************************************
@@ -297,8 +294,8 @@ UBYTE DEV_Module_Init(void)
     printf("Write and read /dev/spidev0.0 \r\n");
     DEV_GPIO_Init();
     DEV_HARDWARE_SPI_begin("/dev/spidev0.0");
-    // IT8951 can handle higher SPI speeds (up to 24MHz)
-    DEV_HARDWARE_SPI_setSpeed(12000000);
+    // 2MHz is safe for init; can be increased after IT8951 is confirmed working
+    DEV_HARDWARE_SPI_setSpeed(2000000);
 #endif
 
 #endif
@@ -315,17 +312,13 @@ void DEV_Module_Exit(void)
 {
 #ifdef RPI
 #ifdef USE_BCM2835_LIB
-    DEV_Digital_Write(IT8951_CS_PIN, LOW);
     DEV_Digital_Write(IT8951_RST_PIN, LOW);
-
     bcm2835_spi_end();
     bcm2835_close();
 #elif USE_WIRINGPI_LIB
-    DEV_Digital_Write(IT8951_CS_PIN, 0);
     DEV_Digital_Write(IT8951_RST_PIN, 0);
 #elif USE_DEV_LIB
     DEV_HARDWARE_SPI_end();
-    DEV_Digital_Write(IT8951_CS_PIN, 0);
     DEV_Digital_Write(IT8951_RST_PIN, 0);
 #endif
 #endif
